@@ -1,4 +1,5 @@
-
+"""Manage access to and generation of driftscan analysis products.
+"""
 
 import os.path
 import shutil
@@ -17,31 +18,32 @@ from drift.core import skymodel
 
 
 
-teltype_dict =  {   'UnpolarisedCylinder'   : cylinder.UnpolarisedCylinderTelescope,
-                    'PolarisedCylinder'     : cylinder.PolarisedCylinderTelescope,
-                    'GMRT'                  : gmrt.GmrtUnpolarised,
-                    'FocalPlane'            : focalplane.FocalPlaneArray,
-                    'RestrictedCylinder'    : restrictedcylinder.RestrictedCylinder,
-                    'RestrictedPolarisedCylinder'    : restrictedcylinder.RestrictedPolarisedCylinder,
-                    'RestrictedExtra'       : restrictedcylinder.RestrictedExtra,
-                    'GradientCylinder'       : exotic_cylinder.GradientCylinder
-                }
+teltype_dict =  {
+    'UnpolarisedCylinder': cylinder.UnpolarisedCylinderTelescope,
+    'PolarisedCylinder': cylinder.PolarisedCylinderTelescope,
+    'GMRT': gmrt.GmrtUnpolarised,
+    'FocalPlane': focalplane.FocalPlaneArray,
+    'RestrictedCylinder': restrictedcylinder.RestrictedCylinder,
+    'RestrictedPolarisedCylinder': restrictedcylinder.RestrictedPolarisedCylinder,
+    'RestrictedExtra': restrictedcylinder.RestrictedExtra,
+    'GradientCylinder': exotic_cylinder.GradientCylinder
+}
 
 
 ## KLTransform configuration
-kltype_dict =   {   'KLTransform'   : kltransform.KLTransform,
-                    'DoubleKL'      : doublekl.DoubleKL,
-                }
-
+kltype_dict = {
+    'KLTransform': kltransform.KLTransform,
+    'DoubleKL': doublekl.DoubleKL,
+}
 
 
 ## Power spectrum estimation configuration
-pstype_dict =   {   'Full'          : psestimation.PSExact,
-                    'MonteCarlo'    : psmc.PSMonteCarlo,
-                    'MonteCarloAlt' : psmc.PSMonteCarloAlt,
-                    'Cross'         : crosspower.CrossPower
-                }
-
+pstype_dict =   {
+    'Full': psestimation.PSExact,
+    'MonteCarlo': psmc.PSMonteCarlo,
+    'MonteCarloAlt': psmc.PSMonteCarloAlt,
+    'Cross': crosspower.CrossPower
+}
 
 
 def _resolve_class(clstype, clsdict, objtype=''):
@@ -72,9 +74,12 @@ def _resolve_class(clstype, clsdict, objtype=''):
     return cls_ref
 
 
-
 class ProductManager(object):
+    """Manage access and generation to analysis products.
 
+    This is telescope objects, beam transfer matrices, KL filters and power
+    spectrum estimators.
+    """
     directory = None
 
     gen_beams = False
@@ -87,6 +92,20 @@ class ProductManager(object):
 
     @classmethod
     def from_config(cls, configfile):
+        """Create a ProductManager from a config file.
+
+        This will create both the directory specified as the output directory
+        *and* copy the configuration file into it.
+
+        Parameters
+        ----------
+        configfile : string
+            Path to configuration file to load.
+
+        Returns
+        -------
+        m : ProductManager
+        """
 
         configfile = os.path.normpath(os.path.expandvars(os.path.expanduser(configfile)))
 
@@ -102,7 +121,7 @@ class ProductManager(object):
 
         outdir = yconf['config']['output_directory']
 
-
+        ## Create output directory and copy over params file.
         if mpiutil.rank0:
 
             # Create directory if required
@@ -131,27 +150,38 @@ class ProductManager(object):
                 with open(dfile, 'w+') as f:
                     f.write(config_contents)
 
-
         # Load config into a new class and return
         c = cls()
-        c.load_config(configfile)
-
-        return c
-
-
-
-
-
-    def load_config(self, configfile):
 
         with open(configfile) as f:
             yconf = yaml.safe_load(f)
 
-        ## Global configuration
-        ## Create output directory and copy over params file.
-        if 'config' not in yconf:
-            raise Exception('Configuration file must have an \'config\' section.')
+        c.apply_config(yconf)
 
+        return c
+
+    def apply_config(self, yconf):
+        """Apply config from a dictionary.
+
+        This does not create anything on disk.
+
+        Parameters
+        ----------
+        yconf : dict
+            Dictionary containing the configuration of the Product Manager.
+        """
+
+        # Check for required sections in files
+        if 'config' not in yconf:
+            raise ValueError('Configuration file must have an \'config\' section.')
+
+        if 'telescope' not in yconf:
+            raise ValueError('Configuration file must have an \'telescope\' section.')
+
+        # Keep a copy of the config
+        self.config = yconf
+
+        ## Global configuration
         self.directory = yconf['config']['output_directory']
         self.directory = os.path.expanduser(self.directory)
         self.directory = os.path.expandvars(self.directory)
@@ -162,52 +192,46 @@ class ProductManager(object):
         if mpiutil.rank0:
             print "Product directory:", self.directory
 
+
         ## Telescope configuration
-        if 'telescope' not in yconf:
-            raise Exception('Configuration file must have an \'telescope\' section.')
-
         teltype = yconf['telescope']['type']
-
-
         telclass = _resolve_class(teltype, teltype_dict, 'telescope')
-
         self.telescope = telclass.from_config(yconf['telescope'])
 
 
-        if 'reionisation' in yconf['config']:
-            if yconf['config']['reionisation']:
-                skymodel._reionisation = True
+        if yconf['config'].get('reionisation'):
+            skymodel._reionisation = True
 
         ## Beam transfer generation
-        if 'nosvd' in yconf['config'] and yconf['config']['nosvd']:
-            self.beamtransfer = beamtransfer.BeamTransferNoSVD(self.directory + '/bt/', telescope=self.telescope)
-        else:
-            self.beamtransfer = beamtransfer.BeamTransfer(self.directory + '/bt/', telescope=self.telescope)
 
-        ## Use the full SVD if requested
-        if 'fullsvd' in yconf['config'] and yconf['config']['fullsvd']:
-            self.beamtransfer = beamtransfer.BeamTransferFullSVD(self.directory + '/bt/', telescope=self.telescope)
-        else:
-            self.beamtransfer = beamtransfer.BeamTransfer(self.directory + '/bt/', telescope=self.telescope)
+        # Decide on type of beam transfers
+        btclass = beamtransfer.BeamTransfer
+        if yconf['config'].get('nosvd'):  # Use no SVD if requested
+            btclass = beamtransfer.BeamTransferNoSVD
+        if yconf['config'].get('fullsvd'):  # Use the full SVD if requested
+            btclass = beamtransfer.BeamTransferFullSVD
 
-        ## Set the singular value cut for the beamtransfers
+        # Create the beam transfer manager
+        self.beamtransfer = btclass(self.directory + '/bt/', telescope=self.telescope)
+
+        # Set the singular value cut for the beamtransfers
         if 'svcut' in yconf['config']:
             self.beamtransfer.svcut = float(yconf['config']['svcut'])
 
-        ## Set the singular value cut for the *polarisation* beamtransfers
+        # Set the singular value cut for the *polarisation* beamtransfers
         if 'polsvcut' in yconf['config']:
             self.beamtransfer.polsvcut = float(yconf['config']['polsvcut'])
 
-        if yconf['config']['beamtransfers']:
+        if yconf['config'].get('beamtransfers'):
             self.gen_beams = True
 
-        if 'skip_svd' in yconf['config'] and yconf['config']['skip_svd']:
+        if yconf['config'].get('skip_svd'):
             self.skip_svd = True
 
+        ## Configure the KL Transforms
         self.kltransforms  = {}
 
         if 'kltransform' in yconf:
-
             for klentry in yconf['kltransform']:
                 kltype = klentry['type']
                 klname = klentry['name']
@@ -217,14 +241,13 @@ class ProductManager(object):
                 kl = klclass.from_config(klentry, self.beamtransfer, subdir=klname)
                 self.kltransforms[klname] = kl
 
-        if yconf['config']['kltransform']:
+        if yconf['config'].get('kltransform'):
             self.gen_kl = True
 
-
-
+        ## Configure the PS estimators
         self.psestimators = {}
 
-        if yconf['config']['psfisher']:
+        if yconf['config'].get('psfisher'):
             self.gen_ps = True
 
             if 'psfisher' not in yconf:
@@ -244,23 +267,29 @@ class ProductManager(object):
                 else:
                     self.psestimators[psname] = psclass.from_config(psentry, self.kltransforms[klname], subdir=psname)
 
-
-
-
     def generate(self):
+        """Calculate the analysis products.
+        """
 
+        # Create the directory if it does not exist
+        if not os.path.exists(self.directory):
+            os.makedirs(self.directory)
 
+        # Dump the config from the internal setup
+        with open(os.path.join(self.directory, 'configdump.yaml'), 'r+') as fh:
+            yaml.dump(self.config, fh)
+
+        # Generate the transfer matrices
         if self.gen_beams:
             self.beamtransfer.generate(skip_svd=self.skip_svd)
 
-
+        # Generate the KLs
         if self.gen_kl:
-
             for klname, klobj in self.kltransforms.items():
                 klobj.generate()
 
+        # Generate the PS estimators
         if self.gen_ps:
-
             for psname, psobj in self.psestimators.items():
                 psobj.generate()
                 psobj.delbands()
